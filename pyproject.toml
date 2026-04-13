@@ -1,6 +1,6 @@
 [project]
 name = "catalog-client"
-version = "0.1.0"
+version = "0.1.1"
 description = "Custom Redis client with retries for tenants products catalog"
 authors = [{name = "Oleg Sidorov", email = "sidorov.works@yandex.ru"}]
 license = {text = "MIT"}

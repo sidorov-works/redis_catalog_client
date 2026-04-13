@@ -91,7 +91,7 @@ class CatalogClient:
                 raise RuntimeError("CatalogClient connection is closed")
                 
             if self._redis is None:
-                self._redis = Redis(self._connection_pool)
+                self._redis = Redis(connection_pool=self._connection_pool)
                 try:
                     if not await self._redis.ping():
                         raise ConnectionError("Redis ping failed")
