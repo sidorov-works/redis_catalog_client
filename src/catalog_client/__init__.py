@@ -1,7 +1,21 @@
 # src/catalog_client/__init__.py
 
-from .client import CatalogClient
+from .client import (
+    CatalogClient,
+    CATEGORY_FIELD,
+    NAME_FIELD,
+    CHARACTERISTICS_FIELD,
+    COMMON_CHARACTERISTICS_FIELD,
+    DIFFERENT_CHARACTERISTICS_FIELD,
+    ARTICLES_FIELD
+)
 
 __all__ = [
-    "CatalogClient"
+    "CatalogClient",
+    "CATEGORY_FIELD",
+    "NAME_FIELD",
+    "CHARACTERISTICS_FIELD",
+    "COMMON_CHARACTERISTICS_FIELD",
+    "DIFFERENT_CHARACTERISTICS_FIELD",
+    "ARTICLES_FIELD"
 ]
