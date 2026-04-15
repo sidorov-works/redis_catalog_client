@@ -35,12 +35,13 @@ class CatalogClient:
     
     def __init__(
             self,
+            # Либо принимаем готовый (внешний) пул соединений:
             redis_connection_pool: Optional[ConnectionPool] = None,
+            # Либо создаем внутри себя единичное соединение со следующими параметрами:
             redis_host: str = "localhost",
             redis_port: int = 6379,
             redis_password: Optional[str] = None,
             redis_db_number: int = 0,
-            redis_max_connections: int = 100,
             redis_socket_timeout: float = 10.0,
             redis_socket_connect_timeout: float = 10.0,
             redis_health_check_interval: float = 30.0,
@@ -49,11 +50,11 @@ class CatalogClient:
         """
         Args:
             redis_connection_pool (Optional[ConnectionPool], optional): Готовый пул соединений Redis. Defaults to None.
+                **ВНИМАНИЕ:** Если передается готовый пул, то все остальные параметры игнорируются.
             redis_host (str, optional): Имя Redis хоста (без протокола). Defaults to "localhost".
             redis_port (int, optional): Номер порта Redis. Defaults to 6379.
             redis_password (Optional[str], optional): Пароль Redis. Defaults to None.
             redis_db_number (int, optional): Номер БД Redis с каталогом (от 0 до 15). Defaults to 0.
-            redis_max_connections (int, optional): Максимальное кол-во подключений через пул. Defaults to 100.
             redis_socket_timeout (float, optional): Максимальное время ожидания ответа от Redis на любую операцию. Defaults to 10.0.
             redis_socket_connect_timeout (float, optional): Максимальное время ожидания подключения. Defaults to 10.0.
             redis_health_check_interval (float, optional): Периодичность проверки доступности Redis. Defaults to 30.0.
@@ -62,22 +63,24 @@ class CatalogClient:
 
         # Если передали готовый connection pool, то просто сохраняем его.
         if redis_connection_pool and isinstance(redis_connection_pool, ConnectionPool):
-            self._connection_pool = redis_connection_pool
+            self._external_pool = redis_connection_pool
+            self._own_connection = None  
         # Если же готовый пул соединений не передаен, создадим его
         else:
             url = f"redis://:{redis_password}@" if redis_password else "redis://"
             url += f"{redis_host}:{redis_port}/{redis_db_number}"
             
-            self._connection_pool = ConnectionPool.from_url(
+            self._own_connection = Redis.from_url(
                 url=url,
-                max_connections=redis_max_connections,
                 socket_timeout=redis_socket_timeout,
                 socket_connect_timeout=redis_socket_connect_timeout,
                 health_check_interval=redis_health_check_interval,
                 retry_on_timeout=True,
-                socket_keepalive=True,  # Важно для стабильности долгоживущих соединений
-                decode_responses=False  # В нашем случае важно False, так как работаем с бинарными данными
+                socket_keepalive=True,
+                decode_responses=False
             )
+
+            self._external_pool = None
 
         self._redis = None
         self._is_closed = False
@@ -89,25 +92,39 @@ class CatalogClient:
         async with self._connection_lock:
             if self._is_closed:
                 raise RuntimeError("CatalogClient connection is closed")
-                
-            if self._redis is None:
-                self._redis = Redis(connection_pool=self._connection_pool)
-                try:
-                    if not await self._redis.ping():
-                        raise ConnectionError("Redis ping failed")
-                    logger.debug("CatalogClient connected successfully")
-                except Exception as e:
-                    self._redis = None
-                    logger.error(f"CatalogClient connection failed: {e}")
-                    raise
+            
+            if self._external_pool:
+                # Используем пул
+                if self._redis is None:
+                    self._redis = Redis(connection_pool=self._external_pool)
+            else:
+                # Используем прямое соединение
+                if self._own_connection is None:
+                    raise RuntimeError("Direct connection not initialized")
+                self._redis = self._own_connection
+            
+            # Проверяем соединение
+            try:
+                if not await self._redis.ping():
+                    raise ConnectionError("Redis ping failed")
+                logger.debug("CatalogClient connected successfully")
+            except Exception as e:
+                if not self._external_pool:
+                    # Для прямого соединения сбрасываем
+                    self._own_connection = None
+                self._redis = None
+                logger.error(f"CatalogClient connection failed: {e}")
+                raise
 
     async def close(self):
         """Закрытие соединения с Redis"""
         async with self._connection_lock:
-            if not self._is_closed and self._redis is not None:
-                await self._redis.close()
+            if not self._is_closed:
+                if self._redis is not None:
+                    await self._redis.close()
                 self._is_closed = True
                 self._redis = None
+                self._own_connection = None
                 logger.debug("CatalogClient connection closed")
 
     async def _execute_with_retry(self, operation, *args, **kwargs):
