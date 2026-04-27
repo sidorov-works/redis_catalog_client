@@ -64,24 +64,22 @@ class CatalogClient:
         # Если передали готовый connection pool, то просто сохраняем его.
         if redis_connection_pool and isinstance(redis_connection_pool, ConnectionPool):
             self._external_pool = redis_connection_pool
-            self._own_connection = None  
-        # Если же готовый пул соединений не передаен, создадим его
-        else:
-            url = f"redis://:{redis_password}@" if redis_password else "redis://"
-            url += f"{redis_host}:{redis_port}/{redis_db_number}"
-            
-            self._own_connection = Redis.from_url(
-                url=url,
-                socket_timeout=redis_socket_timeout,
-                socket_connect_timeout=redis_socket_connect_timeout,
-                health_check_interval=redis_health_check_interval,
-                retry_on_timeout=True,
-                socket_keepalive=True,
-                decode_responses=False
-            )
 
+        # Если же готовый пул соединений не передаен, 
+        # подготовим и сохраним параметры для нового собственного подключения
+        else:
+            self._url = f"redis://:{redis_password}@" if redis_password else "redis://"
+            self._url += f"{redis_host}:{redis_port}/{redis_db_number}"
+
+            self._socket_timeout=redis_socket_timeout
+            self._socket_connect_timeout=redis_socket_connect_timeout
+            self._health_check_interval=redis_health_check_interval
+
+            # И не забудем отметить, что готовый пул нам не передавали
             self._external_pool = None
 
+        # Непосредственного подключения пока нет - 
+        # оно будет создано позднее ("ленивая" инициализация)
         self._redis = None
         self._is_closed = False
         self._connection_lock = asyncio.Lock()
@@ -93,25 +91,28 @@ class CatalogClient:
             if self._is_closed:
                 raise RuntimeError("CatalogClient connection is closed")
             
-            if self._external_pool:
-                # Используем пул
-                if self._redis is None:
-                    self._redis = Redis(connection_pool=self._external_pool)
-            else:
-                # Используем прямое соединение
-                if self._own_connection is None:
-                    raise RuntimeError("Direct connection not initialized")
-                self._redis = self._own_connection
-            
-            # Проверяем соединение
             try:
-                if not await self._redis.ping():
-                    raise ConnectionError("Redis ping failed")
-                logger.debug("CatalogClient connected successfully")
+                if self._redis is None:
+                    if self._external_pool:
+                        self._redis = Redis(connection_pool=self._external_pool)
+                    else:
+                        self._redis = Redis.from_url(
+                            url=self._url,
+                            socket_timeout=self._socket_timeout,
+                            socket_connect_timeout=self._socket_connect_timeout,
+                            health_check_interval=self._health_check_interval,
+                            retry_on_timeout=True,
+                            socket_keepalive=True,
+                            decode_responses=False
+                        )
+                
+                    # Проверяем соединение один раз - при создании
+                    if not await self._redis.ping():
+                        raise ConnectionError("Redis ping failed")
+                    
+                    logger.debug("CatalogClient connected successfully")
+
             except Exception as e:
-                if not self._external_pool:
-                    # Для прямого соединения сбрасываем
-                    self._own_connection = None
                 self._redis = None
                 logger.error(f"CatalogClient connection failed: {e}")
                 raise
@@ -124,7 +125,6 @@ class CatalogClient:
                     await self._redis.close()
                 self._is_closed = True
                 self._redis = None
-                self._own_connection = None
                 logger.debug("CatalogClient connection closed")
 
     async def _execute_with_retry(self, operation, *args, **kwargs):
