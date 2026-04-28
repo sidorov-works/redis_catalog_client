@@ -144,14 +144,8 @@ class CatalogClient:
 
                 async with self._connection_lock:
                     if self._redis is not None:
-                        try:
-                            await self._redis.close()
-                        except Exception as close_error:
-                            # Логируем ошибку закрытия, но НЕ выкидываем
-                            logger.debug(f"Error closing connection: {close_error}")
-                        finally:
-                            self._redis = None
-                        # Исходное исключение e продолжит всплывать после блока except
+                        await self._redis.close()
+                        self._redis = None
 
 
     async def get_by_article(self, article: str, tenant: str) -> Optional[Dict[str, Any]]:

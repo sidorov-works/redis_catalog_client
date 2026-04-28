@@ -13,7 +13,7 @@
 ## Установка
 
 ```bash
-pip install "git+https://github.com/sidorov-works/redis_catalog_client.git@v0.1.4"
+pip install "git+https://github.com/sidorov-works/redis_catalog_client.git@v0.1.5"
 ```
 
 ## Быстрый старт
