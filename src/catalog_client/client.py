@@ -223,6 +223,101 @@ class CatalogClient:
         # Только ретраи для сетевых ошибок, ошибки данных не ретраим
         return await self._execute_with_retry(op)
 
+    async def get_generalized_description_for_articles(
+        self,
+        articles: List[str],
+        tenant: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Создает обобщенное описание для произвольного набора артикулов.
+        
+        Args:
+            articles: Список артикулов для обобщения
+            tenant: Идентификатор тенанта
+            
+        Returns:
+            Словарь с обобщенным описанием:
+            {
+                'name': str | None,                 # Наименование (если совпадает у всех)
+                'category': str | None,             # Категория (если совпадает у всех)
+                'articles': List[str],              # Список артикулов
+                'common_characteristics': Dict,     # Общие характеристики
+                'different_characteristics': Dict   # Различающиеся характеристики
+            }
+            Возвращает None, если найдено менее 2 артикулов
+        """
+        if len(articles) < 2:
+            logger.warning(f"Need at least 2 articles for generalization, got {len(articles)}")
+            return None
+        
+        # 1. Собираем данные всех артикулов
+        products_data = []
+        valid_articles = []
+        
+        for article in articles:
+            product_data = await self.get_by_article(article, tenant)
+            if product_data:
+                products_data.append(product_data)
+                valid_articles.append(article)
+            else:
+                logger.warning(f"Article {article} not found for tenant {tenant}")
+        
+        if len(valid_articles) < 2:
+            logger.warning(f"Less than 2 valid articles found for generalization")
+            return None
+        
+        # 2. Определяем общее наименование (если совпадает у всех)
+        common_name = None
+        names = [p.get(NAME_FIELD, '') for p in products_data]
+        if names and all(n == names[0] for n in names):
+            common_name = names[0]
+        
+        # 3. Определяем общую категорию (если совпадает у всех)
+        common_category = None
+        categories = [p.get(CATEGORY_FIELD, '') for p in products_data]
+        if categories and all(c == categories[0] for c in categories):
+            common_category = categories[0]
+        
+        # 4. Анализируем характеристики
+        all_char_names = set()
+        for p in products_data:
+            all_char_names.update(p.get(CHARACTERISTICS_FIELD, {}).keys())
+        
+        common_chars = {}
+        diff_chars = {}
+        
+        for char_name in all_char_names:
+            # Собираем значения этой характеристики у всех товаров
+            values_by_article = {}
+            values_set = set()
+            
+            for article, product in zip(valid_articles, products_data):
+                value = product.get(CHARACTERISTICS_FIELD, {}).get(char_name, '')
+                if value:  # пустые значения игнорируем
+                    values_by_article[article] = value
+                    values_set.add(value)
+            
+            if not values_by_article:
+                # У всех товаров эта характеристика отсутствует или пуста
+                continue
+            
+            if len(values_set) == 1:
+                # У всех одинаковое значение
+                common_chars[char_name] = next(iter(values_set))
+            else:
+                # Значения различаются
+                diff_chars[char_name] = values_by_article
+        
+        # 5. Формируем результат
+        return {
+            NAME_FIELD: common_name,
+            CATEGORY_FIELD: common_category,
+            ARTICLES_FIELD: valid_articles,
+            COMMON_CHARACTERISTICS_FIELD: common_chars,
+            DIFFERENT_CHARACTERISTICS_FIELD: diff_chars
+        }
+
+
     async def get_by_product(self, product_name: str, tenant: str) -> Optional[Dict[str, Any]]:
         """
         Получение обобщенных данных товара по названию.
@@ -233,7 +328,7 @@ class CatalogClient:
             tenant: Идентификатор тенанта
             
         Returns:
-            Словарь с обобщенными данными или None если не найден
+            Словарь с данными товара или None если не найден
         """
         async def op():
             # Получаем список артикулов для этого товара
@@ -244,7 +339,7 @@ class CatalogClient:
             articles = json.loads(articles_json.decode('utf-8'))
             if not articles:
                 return None
-                
+            
             # Если только один артикул - возвращаем его данные
             if len(articles) == 1:
                 compressed = await self._redis.hget(f"catalog:{tenant}:articles", articles[0])
@@ -252,104 +347,10 @@ class CatalogClient:
                     return None
                 return msgpack.unpackb(zlib.decompress(compressed))
             
-            # Если же у товара несколько артикулов, формируем обобщенное описание
-            return await self._create_generalized_description(product_name, articles, tenant)
+            # Если артикулов несколько - используем общий метод обобщения
+            return await self.get_generalized_description_for_articles(articles, tenant)
         
         return await self._execute_with_retry(op)
-
-    async def _create_generalized_description(
-            self, product_name: str, 
-            articles: List[str], 
-            tenant: str
-            ) -> Dict[str, Any]:
-        """
-        Создание обобщенного описания для товара с несколькими артикулами.
-        
-        Args:
-            product_name: Название товара
-            articles: Список артикулов
-            tenant: Идентификатор тенанта
-            
-        Returns:
-            Словарь с обобщенным описанием:
-            {
-                'name': str,
-                'category': str,
-                'articles': List[str],
-                'common_characteristics': Dict[str, str],
-                'different_characteristics': Dict[str, Dict[str, str]]
-            }
-        """
-        # Собираем данные всех артикулов
-        all_products = []
-        for article in articles:
-            compressed = await self._redis.hget(f"catalog:{tenant}:articles", article)
-            if compressed:
-                try:
-                    product_data = msgpack.unpackb(zlib.decompress(compressed))
-                    all_products.append(product_data)
-                except Exception as e:
-                    logger.warning(f"Error decompressing article {article}: {e}")
-                    continue
-        
-        if not all_products:
-            # Возвращаем минимальную структуру вместо сообщения об ошибке
-            return {
-                NAME_FIELD: product_name,
-                CATEGORY_FIELD: '',
-                ARTICLES_FIELD: articles,
-                COMMON_CHARACTERISTICS_FIELD: {},
-                DIFFERENT_CHARACTERISTICS_FIELD: {}
-            }
-        
-        # Берем первый товар как базовый
-        base_product = all_products[0]
-        result = {
-            NAME_FIELD: product_name,
-            CATEGORY_FIELD: base_product.get(CATEGORY_FIELD, ''),
-            ARTICLES_FIELD: articles,
-            COMMON_CHARACTERISTICS_FIELD: {},
-            DIFFERENT_CHARACTERISTICS_FIELD: {}
-        }
-        
-        # Определяем общие и различные характеристики
-        common_chars = {}
-        diff_chars = {}
-        
-        # Проходим по всем характеристикам базового товара
-        base_characteristics = base_product.get(CHARACTERISTICS_FIELD, {})
-        if not base_characteristics:
-            return result
-        
-        for char_name, base_value in base_characteristics.items():
-            if not base_value:  # Пропускаем пустые значения
-                continue
-                
-            values = {base_value}
-            # Собираем значения этой характеристики у всех товаров
-            for product in all_products[1:]:
-                value = product.get(CHARACTERISTICS_FIELD, {}).get(char_name)
-                if value:
-                    values.add(value)
-            
-            # Если все значения одинаковые - общая характеристика
-            if len(values) == 1:
-                common_chars[char_name] = base_value
-            else:
-                # Различные значения по артикулам
-                char_values_by_article = {}
-                for article, product in zip(articles, all_products):
-                    value = product.get(CHARACTERISTICS_FIELD, {}).get(char_name, "")
-                    if value:
-                        char_values_by_article[article] = value
-                if char_values_by_article:
-                    diff_chars[char_name] = char_values_by_article
-        
-        # Сохраняем в структурированном виде
-        result[COMMON_CHARACTERISTICS_FIELD] = common_chars
-        result[DIFFERENT_CHARACTERISTICS_FIELD] = diff_chars
-        
-        return result
 
     async def update_products_batch(self, tenant: str, products_by_article: Dict, 
                                 product_index: Dict):
