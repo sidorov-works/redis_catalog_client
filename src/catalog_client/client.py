@@ -407,6 +407,17 @@ class CatalogClient:
             return bool(exists)
         
         return await self._execute_with_retry(op)
+    
+    async def filter_existing_articles(self, articles: List[str], tenant: str) -> List[str]:
+        """Возвращает только те артикулы, которые существуют в каталоге"""
+        async def op():
+            compressed_list = await self._redis.hmget(
+                f"catalog:{tenant}:articles", 
+                *articles
+            )
+            return [article for article, compressed in zip(articles, compressed_list) if compressed]
+        
+        return await self._execute_with_retry(op)
 
     async def product_name_exists(self, product_name: str, tenant: str) -> bool:
         """Проверка существования названия товара"""
